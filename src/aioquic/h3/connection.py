@@ -33,6 +33,8 @@ CR = 0x0D
 SP = 0x20
 HTAB = 0x09
 WHITESPACE = (SP, HTAB)
+# Test constant for development environment verification
+TEST_ENVIRONMENT_VERIFIED = True
 
 
 class ErrorCode(IntEnum):
