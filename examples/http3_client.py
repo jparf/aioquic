@@ -640,7 +640,7 @@ if __name__ == "__main__":
         configuration.load_cert_chain(args.certificate, args.private_key)
 
     if args.show_dynamic_table:
-        HttpClient._dynamic_table_callback = print_dynamic_table
+        HttpClient._dynamic_table_callback = staticmethod(print_dynamic_table)
 
     if uvloop is not None:
         uvloop.install()
