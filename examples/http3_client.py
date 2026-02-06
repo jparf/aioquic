@@ -39,6 +39,32 @@ HttpConnection = Union[H0Connection, H3Connection]
 
 USER_AGENT = "aioquic/" + aioquic.__version__
 
+DYNAMIC_ENTRY_OVERHEAD = 32
+
+
+def print_dynamic_table(role: str, table: dict) -> None:
+    """Print the QPACK dynamic table state as an ASCII table."""
+    entries = table["entries"]
+    max_cap = table["max_capacity"]
+    cur_cap = table["current_capacity"]
+    count = len(entries)
+
+    print(f"\n=== QPACK Dynamic Table ({role.capitalize()}) ===")
+    print("+-------+-----------------------------+-----------------------------+------+")
+    print("| Index | Name                        | Value                       | Size |")
+    print("+-------+-----------------------------+-----------------------------+------+")
+    if not entries:
+        print("|                              (empty)                                  |")
+    else:
+        for i, (name, value) in enumerate(entries):
+            n = name.decode(errors="replace")
+            v = value.decode(errors="replace")
+            size = DYNAMIC_ENTRY_OVERHEAD + len(name) + len(value)
+            print(f"| {i:>5} | {n:<27} | {v:<27} | {size:>4} |")
+    print("+-------+-----------------------------+-----------------------------+------+")
+    print(f"Capacity: {cur_cap}/{max_cap} bytes | Entries: {count}")
+    print()
+
 
 class URL:
     def __init__(self, url: str) -> None:
@@ -122,6 +148,8 @@ class WebSocket:
 
 
 class HttpClient(QuicConnectionProtocol):
+    _dynamic_table_callback: Optional[Callable] = None
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
@@ -135,7 +163,10 @@ class HttpClient(QuicConnectionProtocol):
         if self._quic.configuration.alpn_protocols[0].startswith("hq-"):
             self._http = H0Connection(self._quic)
         else:
-            self._http = H3Connection(self._quic)
+            self._http = H3Connection(
+                self._quic,
+                dynamic_table_callback=self._dynamic_table_callback,
+            )
 
     async def get(self, url: str, headers: Optional[dict] = None) -> Deque[H3Event]:
         """
@@ -550,6 +581,11 @@ if __name__ == "__main__":
         help="maximum datagram size to send, excluding UDP or IP overhead",
     )
     parser.add_argument(
+        "--show-dynamic-table",
+        action="store_true",
+        help="print the QPACK dynamic table state to the console",
+    )
+    parser.add_argument(
         "--zero-rtt", action="store_true", help="try to send requests using 0-RTT"
     )
 
@@ -602,6 +638,9 @@ if __name__ == "__main__":
     # load SSL certificate and key
     if args.certificate is not None:
         configuration.load_cert_chain(args.certificate, args.private_key)
+
+    if args.show_dynamic_table:
+        HttpClient._dynamic_table_callback = print_dynamic_table
 
     if uvloop is not None:
         uvloop.install()

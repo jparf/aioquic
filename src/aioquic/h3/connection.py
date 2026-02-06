@@ -3,7 +3,7 @@ import logging
 import re
 from collections.abc import Generator
 from enum import Enum, IntEnum
-from typing import FrozenSet, Optional, Set
+from typing import Callable, FrozenSet, Optional, Set
 
 import pylsqpack
 from aioquic.buffer import UINT_VAR_MAX_SIZE, Buffer, BufferReadError, encode_uint_var
@@ -378,11 +378,17 @@ class H3Connection:
     :param quic: A :class:`~aioquic.quic.connection.QuicConnection` instance.
     """
 
-    def __init__(self, quic: QuicConnection, enable_webtransport: bool = False) -> None:
+    def __init__(
+        self,
+        quic: QuicConnection,
+        enable_webtransport: bool = False,
+        dynamic_table_callback: Optional[Callable[[str, dict], None]] = None,
+    ) -> None:
         # settings
         self._max_table_capacity = 4096
         self._blocked_streams = 16
         self._enable_webtransport = enable_webtransport
+        self._dynamic_table_callback = dynamic_table_callback
 
         self._is_client = quic.configuration.is_client
         self._is_done = False
@@ -627,6 +633,14 @@ class H3Connection:
         self._quic.send_stream_data(stream_id, encode_uint_var(stream_type))
         return stream_id
 
+    def _notify_dynamic_table(self, role: str) -> None:
+        if self._dynamic_table_callback is not None:
+            if role == "encoder":
+                table = self._encoder.get_dynamic_table()
+            else:
+                table = self._decoder.get_dynamic_table()
+            self._dynamic_table_callback(role, table)
+
     def _decode_headers(self, stream_id: int, frame_data: Optional[bytes]) -> Headers:
         """
         Decode a HEADERS block and send decoder updates on the decoder stream.
@@ -643,6 +657,7 @@ class H3Connection:
         except pylsqpack.DecompressionFailed as exc:
             raise QpackDecompressionFailed() from exc
 
+        self._notify_dynamic_table("decoder")
         return headers
 
     def _encode_headers(self, stream_id: int, headers: Headers) -> bytes:
@@ -652,6 +667,7 @@ class H3Connection:
         encoder, frame_data = self._encoder.encode(stream_id, headers)
         self._encoder_bytes_sent += len(encoder)
         self._quic.send_stream_data(self._local_encoder_stream_id, encoder)
+        self._notify_dynamic_table("encoder")
         return frame_data
 
     @contextlib.contextmanager
@@ -700,6 +716,7 @@ class H3Connection:
             )
             self._quic.send_stream_data(self._local_encoder_stream_id, encoder)
             self._settings_received = True
+            self._notify_dynamic_table("encoder")
         elif frame_type == FrameType.MAX_PUSH_ID:
             if self._is_client:
                 raise FrameUnexpected("Servers must not send MAX_PUSH_ID")
@@ -870,6 +887,10 @@ class H3Connection:
         self._local_decoder_stream_id = self._create_uni_stream(
             StreamType.QPACK_DECODER
         )
+
+        # notify initial (empty) table state
+        self._notify_dynamic_table("encoder")
+        self._notify_dynamic_table("decoder")
 
     def _log_stream_type(
         self, stream_id: int, stream_type: int, push_id: Optional[int] = None
@@ -1179,6 +1200,7 @@ class H3Connection:
                 except pylsqpack.DecoderStreamError as exc:
                     raise QpackDecoderStreamError() from exc
                 self._decoder_bytes_received += len(data)
+                self._notify_dynamic_table("encoder")
             elif stream.stream_type == StreamType.QPACK_ENCODER:
                 # feed unframed data to encoder
                 data = buf.pull_bytes(buf.capacity - buf.tell())
@@ -1188,6 +1210,7 @@ class H3Connection:
                 except pylsqpack.EncoderStreamError as exc:
                     raise QpackEncoderStreamError() from exc
                 self._encoder_bytes_received += len(data)
+                self._notify_dynamic_table("decoder")
             else:
                 # unknown stream type, discard data
                 buf.seek(buf.capacity)

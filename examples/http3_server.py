@@ -36,6 +36,32 @@ HttpConnection = Union[H0Connection, H3Connection]
 
 SERVER_NAME = "aioquic/" + aioquic.__version__
 
+DYNAMIC_ENTRY_OVERHEAD = 32
+
+
+def print_dynamic_table(role: str, table: dict) -> None:
+    """Print the QPACK dynamic table state as an ASCII table."""
+    entries = table["entries"]
+    max_cap = table["max_capacity"]
+    cur_cap = table["current_capacity"]
+    count = len(entries)
+
+    print(f"\n=== QPACK Dynamic Table ({role.capitalize()}) ===")
+    print("+-------+-----------------------------+-----------------------------+------+")
+    print("| Index | Name                        | Value                       | Size |")
+    print("+-------+-----------------------------+-----------------------------+------+")
+    if not entries:
+        print("|                              (empty)                                  |")
+    else:
+        for i, (name, value) in enumerate(entries):
+            n = name.decode(errors="replace")
+            v = value.decode(errors="replace")
+            size = DYNAMIC_ENTRY_OVERHEAD + len(name) + len(value)
+            print(f"| {i:>5} | {n:<27} | {v:<27} | {size:>4} |")
+    print("+-------+-----------------------------+-----------------------------+------+")
+    print(f"Capacity: {cur_cap}/{max_cap} bytes | Entries: {count}")
+    print()
+
 
 class HttpRequestHandler:
     def __init__(
@@ -323,6 +349,8 @@ Handler = Union[HttpRequestHandler, WebSocketHandler, WebTransportHandler]
 
 
 class HttpServerProtocol(QuicConnectionProtocol):
+    _dynamic_table_callback: Optional[Callable] = None
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._handlers: dict[int, Handler] = {}
@@ -452,7 +480,11 @@ class HttpServerProtocol(QuicConnectionProtocol):
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ProtocolNegotiated):
             if event.alpn_protocol in H3_ALPN:
-                self._http = H3Connection(self._quic, enable_webtransport=True)
+                self._http = H3Connection(
+                    self._quic,
+                    enable_webtransport=True,
+                    dynamic_table_callback=self._dynamic_table_callback,
+                )
             elif event.alpn_protocol in H0_ALPN:
                 self._http = H0Connection(self._quic)
         elif isinstance(event, DatagramFrameReceived):
@@ -565,6 +597,11 @@ if __name__ == "__main__":
         help="send a retry for new connections",
     )
     parser.add_argument(
+        "--show-dynamic-table",
+        action="store_true",
+        help="print the QPACK dynamic table state to the console",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="increase logging verbosity"
     )
     args = parser.parse_args()
@@ -603,6 +640,9 @@ if __name__ == "__main__":
 
     # load SSL certificate and key
     configuration.load_cert_chain(args.certificate, args.private_key)
+
+    if args.show_dynamic_table:
+        HttpServerProtocol._dynamic_table_callback = print_dynamic_table
 
     if uvloop is not None:
         uvloop.install()
